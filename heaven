@@ -1,0 +1,380 @@
+#!/usr/bin/env bash
+# ✦ HEAVEN · Sync the universe. One word. Peace forever. ✦
+set -Eeuo pipefail
+
+VERSION="1.0.0"
+BASE_DIR="${HEAVEN_BASE_DIR:-$HOME}"
+GH_USER="${HEAVEN_GH_USER:-frnctl}"
+LOCKFILE="/tmp/heaven.lock"
+PREVIEW=false
+
+for arg in "$@"; do
+  case "$arg" in
+    --preview)  PREVIEW=true ;;
+    --version)  echo "heaven v$VERSION"; exit 0 ;;
+    --help|-h)  echo "  heaven           sync all repos"; echo "  heaven --preview dry run"; exit 0 ;;
+  esac
+done
+
+# ─── Sensitive patterns (never committed) ───
+SENSITIVE='\.env$|\.env\.|\.pem$|\.key$|\.p12$|\.pfx$|credentials|_secret|_SECRET|id_rsa|id_ed25519|id_ecdsa|\.netrc$|\.pypirc$|\.npmrc$|token\.json$|\.htpasswd$|kubeconfig|\.jks$|\.keystore$|\.ssh/'
+
+# ─── Colors ───
+W='\033[1;37m'; C='\033[1;36m'; G='\033[1;32m'; Y='\033[1;33m'; R='\033[1;31m'; DIM='\033[2m'; D='\033[0m'
+
+# ─── Clouds (rotating separators) ───
+CLOUD_IDX=0
+cloud() {
+  local n=$(( CLOUD_IDX % 6 ))
+  CLOUD_IDX=$(( CLOUD_IDX + 1 ))
+  case $n in
+    0) echo -e "${DIM}                              ☁    ·    ☁${D}" ;;
+    1) echo -e "${DIM}                    ·    ☁         ·${D}" ;;
+    2) echo -e "${DIM}                         ☁    ·         ☁${D}" ;;
+    3) echo -e "${DIM}                              ·    ☁    ·${D}" ;;
+    4) echo -e "${DIM}                    ☁              ☁${D}" ;;
+    5) echo -e "${DIM}                         ·    ☁              ·${D}" ;;
+  esac
+}
+
+# ─── Peaceful whispers (rotating) ───
+PEACE_IDX=0
+PEACE_MSGS=("sleeps well" "rests quietly" "dreams softly" "all is calm" "safe and sound" "undisturbed" "watches over you" "at peace" "serene" "breathes slowly")
+
+peaceful_msg() {
+  local n=$(( PEACE_IDX % ${#PEACE_MSGS[@]} ))
+  PEACE_IDX=$(( PEACE_IDX + 1 ))
+  echo "${PEACE_MSGS[$n]}"
+}
+
+# ─── Ghost reactions ───
+ghost_react() {
+  local state="$1"
+  case "$state" in
+    peace)
+      local n=$(( PEACE_IDX % ${#PEACE_MSGS[@]} ))
+      PEACE_IDX=$(( PEACE_IDX + 1 ))
+      echo -e "  ${DIM}▝▜██▛▘${D}  ${DIM}${PEACE_MSGS[$n]}${D}"
+      ;;
+    pulled)    echo -e "  ${C}▝▜███▛▘${D}  ${C}↓ descended${D}" ;;
+    pushed)    echo -e "  ${G}▝▜████▛▘${D}  ${G}↑ ascended${D}" ;;
+    synced)    echo -e "  ${G}▝▜███▛▘${D}  ${G}✦ renewed${D}" ;;
+    committed) echo -e "  ${W}▝▜███▛▘${D}  ${W}~ inscribed${D}" ;;
+    guarded)   echo -e "  ${Y}▝▜████▛▘${D}  ${Y}⚔ protected${D}" ;;
+    failed)    echo -e "  ${R}▝▜█▛▘${D}  ${R}✗ troubled${D}" ;;
+    blocked)   echo -e "  ${Y}▝▜██▛▘${D}  ${Y}⚡ blocked${D}" ;;
+    cloned)    echo -e "  ${C}▝▜█████▛▘${D}  ${C}+ born${D}" ;;
+  esac
+}
+
+ok()    { printf "${G}     ✦${D} %s\n" "$*"; }
+warn()  { printf "${Y}     ⚡${D} %s\n" "$*"; }
+err()   { printf "${R}     ✗${D} %s\n" "$*"; }
+guard() { printf "${Y}     ⚔${D} %s\n" "$*"; }
+
+# ─── Lock ───
+acquire_lock() {
+  if [ -f "$LOCKFILE" ]; then
+    local pid; pid=$(cat "$LOCKFILE" 2>/dev/null || echo "")
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      err "Heaven already running (PID $pid)"; exit 1
+    fi
+    rm -f "$LOCKFILE"
+  fi
+  echo $$ > "$LOCKFILE"
+}
+
+REPORT=$(mktemp)
+cleanup() { rm -f "$LOCKFILE" "$REPORT"; }
+trap cleanup EXIT INT TERM
+
+# ─── The Gate ───
+gate() {
+  echo ""
+  echo -e "${DIM}        ☁  ☁  ☁  ☁  ☁  ☁  ☁  ☁  ☁  ☁  ☁${D}"
+  echo ""
+  echo -e "${DIM}                     ·  ${W}✦${DIM}  ·${D}"
+  echo -e "${DIM}                ✧              ✧${D}"
+  echo ""
+  echo -e "${W}               H  E  A  V  E  N${D}"
+  echo ""
+  echo -e "${DIM}                ✧              ✧${D}"
+  echo -e "${DIM}                     ·  ${W}✦${DIM}  ·${D}"
+  echo ""
+  echo -e "${DIM}        ☁  ☁  ☁  ☁  ☁  ☁  ☁  ☁  ☁  ☁  ☁${D}"
+  echo ""
+  echo -e "               ${W}▐▛███▜▌${D}"
+  echo -e "               ${W}▝▜█████▛▘${D}  ${DIM}Follow me${D}"
+  echo ""
+  if ! $PREVIEW; then
+    echo -e "${DIM}           ⛩  Syncing the universe  ⛩${D}"
+  else
+    echo -e "${DIM}           ⛩  Preview · read only   ⛩${D}"
+  fi
+  echo ""
+}
+
+# ─── Repo header (ghost appears) ───
+repo_header() {
+  local name="$1" branch="$2"
+  local total=50 used=$(( ${#name} + ${#branch} + 2 ))
+  local dots=$(( total - used ))
+  [ $dots -lt 3 ] && dots=3
+  echo ""
+  cloud
+  echo ""
+  printf "  ${W}▐▛█▜▌${D}  ${C}%s${D} ${DIM}%s${D} ${W}%s${D}\n" "$name" "$(printf '·%.0s' $(seq 1 $dots))" "$branch"
+}
+
+# ─── Smart add (blocks sensitive files) ───
+smart_add() {
+  local rp="$1"
+  git -C "$rp" add -A
+  local blocked
+  blocked=$(git -C "$rp" diff --cached --name-only 2>/dev/null | grep -iE "$SENSITIVE" || true)
+  if [ -n "$blocked" ]; then
+    GHOST_STATE="guarded"
+    while IFS= read -r f; do
+      [ -n "$f" ] && git -C "$rp" reset HEAD -- "$f" 2>/dev/null && guard "blocked: $f"
+    done <<< "$blocked"
+  fi
+}
+
+# ─── Sync one repo ───
+sync_repo() {
+  local rp="$1"
+  local name=$(basename "$rp")
+  local branch=$(git -C "$rp" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+  GHOST_STATE="peace"
+
+  [ "$branch" = "HEAD" ] && { repo_header "$name" "detached"; warn "detached HEAD · skip"; ghost_react "blocked"; echo "skip" >> "$REPORT"; return; }
+
+  repo_header "$name" "$branch"
+
+  # Fetch
+  if ! git -C "$rp" fetch origin --prune 2>/dev/null; then
+    err "fetch failed"; ghost_react "failed"; echo "fail" >> "$REPORT"; return
+  fi
+
+  # Divergence
+  local lh rh bh
+  lh=$(git -C "$rp" rev-parse "$branch" 2>/dev/null || echo "")
+  rh=$(git -C "$rp" rev-parse "origin/$branch" 2>/dev/null || echo "")
+
+  if [ -n "$lh" ] && [ -n "$rh" ] && [ "$lh" != "$rh" ]; then
+    bh=$(git -C "$rp" merge-base "$branch" "origin/$branch" 2>/dev/null || echo "")
+    if [ "$bh" != "$rh" ] && [ "$bh" != "$lh" ]; then
+      warn "diverged · manual merge needed"
+      ghost_react "blocked"; echo "blocked" >> "$REPORT"; return
+    fi
+  fi
+
+  # Stash if dirty
+  local stashed=false
+  if ! git -C "$rp" diff --quiet 2>/dev/null || ! git -C "$rp" diff --cached --quiet 2>/dev/null; then
+    stashed=true
+    $PREVIEW || git -C "$rp" stash push -m "heaven-$(date +%s)" >/dev/null 2>&1 || true
+  fi
+
+  # Pull
+  if [ -n "$rh" ] && [ "$lh" != "$rh" ]; then
+    local behind=$(git -C "$rp" rev-list "$branch..origin/$branch" --count 2>/dev/null || echo "0")
+    if [ "$behind" -gt 0 ]; then
+      if $PREVIEW; then
+        ok "would pull $behind commits"
+        GHOST_STATE="pulled"
+      else
+        if ! git -C "$rp" pull --rebase origin "$branch" >/dev/null 2>&1; then
+          git -C "$rp" rebase --abort >/dev/null 2>&1 || true
+          if ! git -C "$rp" pull --no-rebase origin "$branch" >/dev/null 2>&1; then
+            err "pull failed"
+            $stashed && git -C "$rp" stash pop 2>/dev/null || true
+            ghost_react "failed"; echo "fail" >> "$REPORT"; return
+          fi
+        fi
+        ok "↓ pulled $behind"
+        GHOST_STATE="pulled"
+      fi
+    fi
+  fi
+
+  # Unstash
+  if $stashed && ! $PREVIEW; then
+    if ! git -C "$rp" stash pop >/dev/null 2>&1; then
+      warn "unstash conflict · resolve manually"
+      ghost_react "failed"; echo "fail" >> "$REPORT"; return
+    fi
+  fi
+
+  # Commit
+  local has_changes=false
+  git -C "$rp" diff --quiet 2>/dev/null && git -C "$rp" diff --cached --quiet 2>/dev/null || has_changes=true
+  [ "$(git -C "$rp" ls-files --others --exclude-standard 2>/dev/null | wc -l | tr -d ' ')" -gt 0 ] && has_changes=true
+
+  if $has_changes; then
+    if $PREVIEW; then
+      ok "has local changes"
+    else
+      smart_add "$rp"
+      local staged=$(git -C "$rp" diff --cached --name-only 2>/dev/null | wc -l | tr -d ' ')
+      if [ "$staged" -gt 0 ]; then
+        git -C "$rp" commit -m "heaven · ${staged} files · $(date +%Y-%m-%d)" >/dev/null 2>&1 && ok "committed $staged files" && GHOST_STATE="committed" || true
+      fi
+    fi
+  fi
+
+  # Push
+  local ahead=$(git -C "$rp" rev-list "origin/$branch..$branch" --count 2>/dev/null || echo "0")
+  if [ "$ahead" -gt 0 ]; then
+    if $PREVIEW; then
+      ok "would push $ahead commits"
+      GHOST_STATE="pushed"
+    else
+      if git -C "$rp" push origin "$branch" 2>/dev/null; then
+        ok "↑ pushed $ahead"
+        GHOST_STATE="pushed"
+      else
+        warn "push rejected"
+        GHOST_STATE="failed"
+      fi
+    fi
+  fi
+
+  # Build
+  if ! $PREVIEW; then
+    if [ -f "$rp/package.json" ]; then
+      (cd "$rp" && npm install --silent >/dev/null 2>&1 && npm run build >/dev/null 2>&1) && ok "build OK" || warn "build"
+    elif [ -f "$rp/requirements.txt" ] || [ -f "$rp/pyproject.toml" ]; then
+      local py_ok=true
+      while IFS= read -r -d '' pyfile; do
+        python3 -m py_compile "$pyfile" 2>/dev/null || py_ok=false
+      done < <(find "$rp" -name '*.py' -not -path '*/.venv/*' -not -path '*/__pycache__/*' -not -path '*/node_modules/*' -print0 2>/dev/null)
+      $py_ok && ok "smoke OK" || warn "py_compile errors"
+    elif [ -f "$rp/go.mod" ]; then
+      (cd "$rp" && go build ./... 2>/dev/null) && ok "build OK" || warn "build"
+    elif [ -f "$rp/Cargo.toml" ]; then
+      (cd "$rp" && cargo check 2>/dev/null) && ok "check OK" || warn "check"
+    fi
+  fi
+
+  # Deploy (host-aware)
+  if [ -f "$rp/.kimea.conf" ]; then
+    local dcmd dhost
+    dcmd=$(grep -E '^KIMEA_DEPLOY_CMD=' "$rp/.kimea.conf" 2>/dev/null | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'")
+    dhost=$(grep -E '^KIMEA_DEPLOY_HOST=' "$rp/.kimea.conf" 2>/dev/null | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'")
+    if [ -n "$dcmd" ]; then
+      local allowed=false
+      for p in systemctl docker docker-compose pm2 supervisorctl nginx apache2ctl ssh; do
+        [[ "$dcmd" == $p* ]] && allowed=true && break
+      done
+      if $allowed; then
+        if $PREVIEW; then
+          ok "would deploy: $dcmd"
+        else
+          # If deploy host specified and command not available locally → SSH
+          if [ -n "$dhost" ] && ! command -v "${dcmd%% *}" >/dev/null 2>&1; then
+            ssh -n "$dhost" "$dcmd" 2>/dev/null && ok "deployed via $dhost" || warn "deploy failed"
+          else
+            eval "$dcmd" 2>/dev/null && ok "deployed" || warn "deploy failed"
+          fi
+        fi
+      else
+        warn "deploy blocked (not whitelisted): $dcmd"
+      fi
+    fi
+  fi
+
+  # Ghost reacts
+  if [ "$GHOST_STATE" = "peace" ]; then
+    if $has_changes || [ "$ahead" -gt 0 ]; then
+      GHOST_STATE="synced"
+    fi
+  fi
+  ghost_react "$GHOST_STATE"
+  echo "synced" >> "$REPORT"
+}
+
+# ─── Peace (the closing) ───
+peace() {
+  local synced; synced=$(grep -c "^synced$" "$REPORT" 2>/dev/null) || synced=0
+  local cloned; cloned=$(grep -c "^cloned$" "$REPORT" 2>/dev/null) || cloned=0
+  local failed; failed=$(grep -c "^fail$" "$REPORT" 2>/dev/null) || failed=0
+  local blocked; blocked=$(grep -c "^blocked$" "$REPORT" 2>/dev/null) || blocked=0
+
+  echo ""
+  echo ""
+  echo -e "${DIM}        ☁  ☁  ☁  ☁  ☁  ☁  ☁  ☁  ☁  ☁  ☁${D}"
+  echo ""
+  echo -e "${DIM}                  ·  ${W}✦${DIM}  ·  ${W}✦${DIM}  ·${D}"
+  echo ""
+  echo -e "          ${W}▐▛█████▜▌${D}  All souls at peace"
+  echo -e "          ${W}▝▜███████▛▘${D}"
+  echo ""
+  echo -e "          ${G}✦${D} $synced synced  ${C}+${D} $cloned cloned  ${Y}⚡${D} $blocked blocked  ${R}✗${D} $failed failed"
+
+  if $PREVIEW; then
+    echo ""
+    echo -e "          ${DIM}Preview · run ${W}heaven${DIM} to ascend${D}"
+  fi
+
+  echo ""
+  echo -e "${DIM}                  ·  ${W}✦${DIM}  ·  ${W}✦${DIM}  ·${D}"
+  echo ""
+  echo -e "${DIM}        ☁  ☁  ☁  ☁  ☁  ☁  ☁  ☁  ☁  ☁  ☁${D}"
+  echo ""
+}
+
+# ─── Main ───
+acquire_lock
+gate
+
+PY=$(command -v python3 2>/dev/null || command -v python 2>/dev/null || echo "python3")
+
+REPOS=$(gh repo list "$GH_USER" --json name,isArchived --limit 100 2>/dev/null | $PY -c "
+import json,sys
+for r in json.load(sys.stdin):
+    if not r.get('isArchived',False): print(r['name'])
+" 2>/dev/null) || REPOS=""
+
+if [ -z "$REPOS" ]; then
+  REPOS=$(curl -sf "https://api.github.com/users/$GH_USER/repos?per_page=100" 2>/dev/null | $PY -c "
+import json,sys
+for r in json.load(sys.stdin):
+    if not r.get('archived',False): print(r['name'])
+" 2>/dev/null) || REPOS=""
+fi
+
+[ -z "$REPOS" ] && { err "Cannot list repos · check gh auth status"; exit 1; }
+
+while IFS= read -r repo; do
+  [ -z "$repo" ] && continue
+  DEST="$BASE_DIR/$repo"
+
+  if [ -d "$DEST/.git" ]; then
+    sync_repo "$DEST"
+  else
+    echo ""
+    cloud
+    echo ""
+    printf "  ${W}▐▛█▜▌${D}  ${C}%s${D}" "$repo"
+    if $PREVIEW; then
+      printf " ${DIM}· would clone${D}\n"
+      ghost_react "peace"
+    else
+      printf " ${DIM}· cloning${D}\n"
+      if git clone "git@github.com:$GH_USER/$repo.git" "$DEST" 2>/dev/null || \
+         git clone "https://github.com/$GH_USER/$repo.git" "$DEST" 2>/dev/null; then
+        ok "cloned"
+        ghost_react "cloned"
+      else
+        err "clone failed"
+        ghost_react "failed"
+        echo "fail" >> "$REPORT"
+        continue
+      fi
+    fi
+    echo "cloned" >> "$REPORT"
+  fi
+done <<< "$REPOS"
+
+peace
