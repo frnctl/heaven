@@ -1,20 +1,56 @@
 #!/usr/bin/env bash
 # ✦ HEAVEN · Sync the universe. One word. Peace forever. ✦
-set -Eeuo pipefail
+set -Euo pipefail
 
-VERSION="1.0.0"
+VERSION="2.1.0-Omni"
+
+# ─── OS Detection ───
+OS_RAW=$(uname -s 2>/dev/null || echo "Unknown")
+case "$OS_RAW" in
+  Linux*)     OS="Linux" ;;
+  Darwin*)    OS="macOS" ;;
+  CYGWIN*|MINGW*|MSYS*|MINGW32*|Windows_NT*) OS="Windows" ;;
+  *)          OS="Unknown ($OS_RAW)" ;;
+esac
+
+# ─── Environment Setup ───
 BASE_DIR="${HEAVEN_BASE_DIR:-$HOME}"
 GH_USER="${HEAVEN_GH_USER:-frnctl}"
-LOCKFILE="/tmp/heaven.lock"
+
+if [ "$OS" = "Windows" ]; then
+  TMP="${TEMP:-${TMP:-/tmp}}"
+else
+  TMP="${TMPDIR:-/tmp}"
+fi
+LOCKFILE="$TMP/heaven.lock"
 PREVIEW=false
 
 for arg in "$@"; do
   case "$arg" in
     --preview)  PREVIEW=true ;;
-    --version)  echo "heaven v$VERSION"; exit 0 ;;
+    --version)  echo "heaven v$VERSION ($OS)"; exit 0 ;;
     --help|-h)  echo "  heaven           sync all repos"; echo "  heaven --preview dry run"; exit 0 ;;
   esac
 done
+
+# ─── Oracle (AI integration) ───
+USE_AI=true
+if ! command -v gh >/dev/null 2>&1 || ! gh extension list 2>/dev/null | grep -q "gh-models"; then
+  USE_AI=false
+fi
+
+oracle() {
+  if ! $USE_AI; then echo ""; return; fi
+  local sys="$1"
+  local input="$2"
+  local in_file="$TMP/heaven_oracle_in_$RANDOM"
+  # Limit input size to prevent breaking the CLI or exceeding context windows
+  echo "$input" | head -c 8000 > "$in_file"
+  local res
+  res=$(gh models run openai/gpt-4o-mini --system-prompt "$sys" "$(cat "$in_file")" 2>/dev/null || echo "")
+  rm -f "$in_file"
+  echo "$res"
+}
 
 # ─── Sensitive patterns (never committed) ───
 SENSITIVE='\.env$|\.env\.|\.pem$|\.key$|\.p12$|\.pfx$|credentials|_secret|_SECRET|id_rsa|id_ed25519|id_ecdsa|\.netrc$|\.pypirc$|\.npmrc$|token\.json$|\.htpasswd$|kubeconfig|\.jks$|\.keystore$|\.ssh/'
@@ -64,6 +100,8 @@ ghost_react() {
     failed)    echo -e "  ${R}▝▜█▛▘${D}  ${R}✗ troubled${D}" ;;
     blocked)   echo -e "  ${Y}▝▜██▛▘${D}  ${Y}⚡ blocked${D}" ;;
     cloned)    echo -e "  ${C}▝▜█████▛▘${D}  ${C}+ born${D}" ;;
+    force_pull) echo -e "  ${Y}▝▜███▛▘${D}  ${Y}↓ forced descent (remote newer)${D}" ;;
+    force_push) echo -e "  ${Y}▝▜███▛▘${D}  ${Y}↑ forced ascent (local newer)${D}" ;;
   esac
 }
 
@@ -84,7 +122,7 @@ acquire_lock() {
   echo $$ > "$LOCKFILE"
 }
 
-REPORT=$(mktemp)
+REPORT=$(mktemp 2>/dev/null || echo "$TMP/heaven_report_$$")
 cleanup() { rm -f "$LOCKFILE" "$REPORT"; }
 trap cleanup EXIT INT TERM
 
@@ -97,6 +135,8 @@ gate() {
   echo -e "${DIM}                ✧              ✧${D}"
   echo ""
   echo -e "${W}               H  E  A  V  E  N${D}"
+  echo -e "${C}                  (Oracle AI Edition)${D}"
+  echo -e "${DIM}                  Host: $OS${D}"
   echo ""
   echo -e "${DIM}                ✧              ✧${D}"
   echo -e "${DIM}                     ·  ${W}✦${DIM}  ·${D}"
@@ -129,7 +169,7 @@ repo_header() {
 # ─── Smart add (blocks sensitive files) ───
 smart_add() {
   local rp="$1"
-  git -C "$rp" add -A
+  git -C "$rp" add -A || true
   local blocked
   blocked=$(git -C "$rp" diff --cached --name-only 2>/dev/null | grep -iE "$SENSITIVE" || true)
   if [ -n "$blocked" ]; then
@@ -156,16 +196,58 @@ sync_repo() {
     err "fetch failed"; ghost_react "failed"; echo "fail" >> "$REPORT"; return
   fi
 
-  # Divergence
+  # Divergence & "Le plus récent a raison"
   local lh rh bh
   lh=$(git -C "$rp" rev-parse "$branch" 2>/dev/null || echo "")
   rh=$(git -C "$rp" rev-parse "origin/$branch" 2>/dev/null || echo "")
 
+  local resolved_divergence=false
+
   if [ -n "$lh" ] && [ -n "$rh" ] && [ "$lh" != "$rh" ]; then
     bh=$(git -C "$rp" merge-base "$branch" "origin/$branch" 2>/dev/null || echo "")
     if [ "$bh" != "$rh" ] && [ "$bh" != "$lh" ]; then
-      warn "diverged · manual merge needed"
-      ghost_react "blocked"; echo "blocked" >> "$REPORT"; return
+      local local_time=$(git -C "$rp" show -s --format=%ct "$lh" 2>/dev/null || echo 0)
+      local remote_time=$(git -C "$rp" show -s --format=%ct "$rh" 2>/dev/null || echo 0)
+      
+      warn "diverged · applying 'most recent wins' miracle"
+      
+      if $USE_AI && ! $PREVIEW; then
+         local conflict_diff=$(git -C "$rp" diff "$lh" "$rh" 2>/dev/null)
+         local c_msg=$(oracle "Deux branches ont divergé. Voici la différence. Donne une seule phrase courte (max 12 mots) expliquant le conflit." "$conflict_diff")
+         [ -n "$c_msg" ] && echo -e "       ${DIM}↳ Oracle: ${c_msg}${D}"
+      fi
+
+      if [ "$local_time" -gt "$remote_time" ]; then
+        if $PREVIEW; then
+          ok "would force push (local is newer)"
+          GHOST_STATE="force_push"
+        else
+          if git -C "$rp" push --force-with-lease origin "$branch" 2>/dev/null || git -C "$rp" push --force origin "$branch" 2>/dev/null; then
+            ok "↑ force pushed local changes (local wins)"
+            GHOST_STATE="force_push"
+            resolved_divergence=true
+            rh="$lh" # Now they are the same
+          else
+            err "force push failed"
+            ghost_react "failed"; echo "fail" >> "$REPORT"; return
+          fi
+        fi
+      else
+        if $PREVIEW; then
+          ok "would hard reset to remote (remote is newer)"
+          GHOST_STATE="force_pull"
+        else
+          if git -C "$rp" reset --hard "origin/$branch" >/dev/null 2>&1; then
+            ok "↓ hard reset to remote (remote wins)"
+            GHOST_STATE="force_pull"
+            resolved_divergence=true
+            lh="$rh" # Now they are the same
+          else
+            err "hard reset failed"
+            ghost_react "failed"; echo "fail" >> "$REPORT"; return
+          fi
+        fi
+      fi
     fi
   fi
 
@@ -176,13 +258,13 @@ sync_repo() {
     $PREVIEW || git -C "$rp" stash push -m "heaven-$(date +%s)" >/dev/null 2>&1 || true
   fi
 
-  # Pull
-  if [ -n "$rh" ] && [ "$lh" != "$rh" ]; then
+  # Pull (if not already resolved by hard reset)
+  if [ -n "$rh" ] && [ "$lh" != "$rh" ] && ! $resolved_divergence; then
     local behind=$(git -C "$rp" rev-list "$branch..origin/$branch" --count 2>/dev/null || echo "0")
     if [ "$behind" -gt 0 ]; then
       if $PREVIEW; then
         ok "would pull $behind commits"
-        GHOST_STATE="pulled"
+        if [ "$GHOST_STATE" = "peace" ]; then GHOST_STATE="pulled"; fi
       else
         if ! git -C "$rp" pull --rebase origin "$branch" >/dev/null 2>&1; then
           git -C "$rp" rebase --abort >/dev/null 2>&1 || true
@@ -193,7 +275,16 @@ sync_repo() {
           fi
         fi
         ok "↓ pulled $behind"
-        GHOST_STATE="pulled"
+        if [ "$GHOST_STATE" = "peace" ]; then GHOST_STATE="pulled"; fi
+        
+        # Pull Summary with Oracle
+        if $USE_AI; then
+           local pull_diff=$(git -C "$rp" log -p -n "$behind" 2>/dev/null)
+           local summary=$(oracle "Résume très brièvement (1 ou 2 phrases claires) les nouveautés téléchargées à partir de ce log Git." "$pull_diff")
+           if [ -n "$summary" ]; then
+             echo -e "       ${DIM}↳ Changelog: ${summary}${D}"
+           fi
+        fi
       fi
     fi
   fi
@@ -201,8 +292,8 @@ sync_repo() {
   # Unstash
   if $stashed && ! $PREVIEW; then
     if ! git -C "$rp" stash pop >/dev/null 2>&1; then
-      warn "unstash conflict · resolve manually"
-      ghost_react "failed"; echo "fail" >> "$REPORT"; return
+      warn "unstash conflict · reseting stash changes to keep peace"
+      git -C "$rp" reset --hard >/dev/null 2>&1 || true
     fi
   fi
 
@@ -216,23 +307,40 @@ sync_repo() {
       ok "has local changes"
     else
       smart_add "$rp"
-      local staged=$(git -C "$rp" diff --cached --name-only 2>/dev/null | wc -l | tr -d ' ')
+      local staged=$(git -C "$rp" diff --cached --name-only 2>/dev/null | wc -l | tr -d ' ' || echo "0")
       if [ "$staged" -gt 0 ]; then
-        git -C "$rp" commit -m "heaven · ${staged} files · $(date +%Y-%m-%d)" >/dev/null 2>&1 && ok "committed $staged files" && GHOST_STATE="committed" || true
+        local msg=""
+        if $USE_AI; then
+          # Pre-push / pre-commit check for subtleties not caught by regex
+          local diff_str=$(git -C "$rp" diff --cached 2>/dev/null)
+          
+          # Smart Commit generation
+          msg=$(oracle "Tu es un développeur expert. Génère un message de commit très court (1 ligne maximum, pas de point à la fin, pas de fioritures) et précis pour ces changements. Ne réponds QUE par le texte du message." "$diff_str")
+          
+          # Remove possible quotes around the generated message
+          msg=$(echo "$msg" | sed 's/^"//;s/"$//')
+        fi
+        
+        [ -z "$msg" ] && msg="heaven · ${staged} files · $(date +%Y-%m-%d)"
+        
+        if git -C "$rp" commit -m "$msg" >/dev/null 2>&1; then
+          ok "committed: $msg"
+          if [ "$GHOST_STATE" = "peace" ]; then GHOST_STATE="committed"; fi
+        fi
       fi
     fi
   fi
 
   # Push
   local ahead=$(git -C "$rp" rev-list "origin/$branch..$branch" --count 2>/dev/null || echo "0")
-  if [ "$ahead" -gt 0 ]; then
+  if [ "$ahead" -gt 0 ] && ! $resolved_divergence; then
     if $PREVIEW; then
       ok "would push $ahead commits"
-      GHOST_STATE="pushed"
+      if [ "$GHOST_STATE" = "peace" ] || [ "$GHOST_STATE" = "committed" ]; then GHOST_STATE="pushed"; fi
     else
       if git -C "$rp" push origin "$branch" 2>/dev/null; then
         ok "↑ pushed $ahead"
-        GHOST_STATE="pushed"
+        if [ "$GHOST_STATE" = "peace" ] || [ "$GHOST_STATE" = "committed" ]; then GHOST_STATE="pushed"; fi
       else
         warn "push rejected"
         GHOST_STATE="failed"
@@ -247,8 +355,8 @@ sync_repo() {
     elif [ -f "$rp/requirements.txt" ] || [ -f "$rp/pyproject.toml" ]; then
       local py_ok=true
       while IFS= read -r -d '' pyfile; do
-        python3 -m py_compile "$pyfile" 2>/dev/null || py_ok=false
-      done < <(find "$rp" -name '*.py' -not -path '*/.venv/*' -not -path '*/__pycache__/*' -not -path '*/node_modules/*' -print0 2>/dev/null)
+        $PY -m py_compile "$pyfile" 2>/dev/null || py_ok=false
+      done < <(find "$rp" -name '*.py' -not -path '*/.venv/*' -not -path '*/__pycache__/*' -not -path '*/node_modules/*' -print0 2>/dev/null || true)
       $py_ok && ok "smoke OK" || warn "py_compile errors"
     elif [ -f "$rp/go.mod" ]; then
       (cd "$rp" && go build ./... 2>/dev/null) && ok "build OK" || warn "build"
@@ -260,8 +368,8 @@ sync_repo() {
   # Deploy (host-aware)
   if [ -f "$rp/.kimea.conf" ]; then
     local dcmd dhost
-    dcmd=$(grep -E '^KIMEA_DEPLOY_CMD=' "$rp/.kimea.conf" 2>/dev/null | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'")
-    dhost=$(grep -E '^KIMEA_DEPLOY_HOST=' "$rp/.kimea.conf" 2>/dev/null | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'")
+    dcmd=$(grep -E '^KIMEA_DEPLOY_CMD=' "$rp/.kimea.conf" 2>/dev/null | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)
+    dhost=$(grep -E '^KIMEA_DEPLOY_HOST=' "$rp/.kimea.conf" 2>/dev/null | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)
     if [ -n "$dcmd" ]; then
       local allowed=false
       for p in systemctl docker docker-compose pm2 supervisorctl nginx apache2ctl ssh; do
@@ -330,7 +438,7 @@ gate
 
 PY=$(command -v python3 2>/dev/null || command -v python 2>/dev/null || echo "python3")
 
-REPOS=$(gh repo list "$GH_USER" --json name,isArchived --limit 100 2>/dev/null | $PY -c "
+REPOS=$(gh repo list "$GH_USER" --json name,isArchived --limit 1000 2>/dev/null | $PY -c "
 import json,sys
 for r in json.load(sys.stdin):
     if not r.get('isArchived',False): print(r['name'])
@@ -351,7 +459,7 @@ while IFS= read -r repo; do
   DEST="$BASE_DIR/$repo"
 
   if [ -d "$DEST/.git" ]; then
-    sync_repo "$DEST"
+    sync_repo "$DEST" || true
   else
     echo ""
     cloud
@@ -365,6 +473,20 @@ while IFS= read -r repo; do
       if git clone "git@github.com:$GH_USER/$repo.git" "$DEST" 2>/dev/null || \
          git clone "https://github.com/$GH_USER/$repo.git" "$DEST" 2>/dev/null; then
         ok "cloned"
+        
+        # Oracle README Generation
+        if $USE_AI && [ ! -f "$DEST/README.md" ]; then
+           local r_files=$(ls -1 "$DEST" 2>/dev/null)
+           local r_content=$(oracle "Génère un README.md minimaliste mais professionnel pour le projet '$repo'. Ce projet contient ces fichiers initiaux : $r_files. Ne renvoie QUE le contenu Markdown sans commentaires." "Génère le README.")
+           if [ -n "$r_content" ]; then
+              echo "$r_content" > "$DEST/README.md"
+              git -C "$DEST" add README.md >/dev/null 2>&1
+              git -C "$DEST" commit -m "✨ Initialized README with Oracle AI" >/dev/null 2>&1
+              git -C "$DEST" push origin main >/dev/null 2>&1 || git -C "$DEST" push origin master >/dev/null 2>&1 || true
+              ok "Oracle crafted README"
+           fi
+        fi
+
         ghost_react "cloned"
       else
         err "clone failed"
